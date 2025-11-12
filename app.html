@@ -1,0 +1,258 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>Go-Back-N ARQ — Interactive Simulator</title>
+<style>
+  :root{
+    --ink:#111827;            /* text */
+    --muted:#6b7280;          /* secondary text */
+    --bg:#f4f6f8;             /* page */
+    --card:#ffffff;           /* panels */
+    --brand:#2b4c7e;          /* primary */
+    --sent:#2980ef;           /* data sent */
+    --ack:#25a55f;            /* acked */
+    --lost:#e6362f;           /* loss */
+    --re:#f1c40f;             /* retransmit */
+    --ring:rgba(43,76,126,.35);
+    --border:#dcdfe4;
+  }
+  *{box-sizing:border-box}
+  body{
+    margin:0; padding:28px; background:var(--bg); color:var(--ink);
+    font:15px/1.45 "Segoe UI",system-ui,SegoeUI,Roboto,Arial;
+  }
+  h2{margin:0 0 14px; font-weight:800; letter-spacing:.2px}
+  .panel{
+    background:var(--card); border:1px solid var(--border);
+    border-radius:14px; box-shadow:0 8px 24px rgba(17,24,39,.08);
+  }
+  #controls{
+    max-width:760px; padding:16px 18px; display:flex; flex-wrap:wrap; gap:14px 18px;
+    align-items:flex-end; margin-bottom:16px;
+  }
+  .field{display:flex; flex-direction:column; gap:6px}
+  .field label{font-size:12px; color:var(--muted); font-weight:700}
+  .field input[type="number"],
+  .field input[type="text"]{
+    padding:9px 10px; border:1px solid #bfc6cf; border-radius:10px; width:160px;
+    background:#fff; outline:none;
+  }
+  .field input[type="range"]{ width:160px }
+  .btn{
+    padding:10px 16px; border:none; color:#fff; background:var(--brand);
+    border-radius:10px; font-weight:700; cursor:pointer;
+    box-shadow:0 2px 10px var(--ring);
+  }
+  #framesWrap{ position:relative; }
+  #frames{
+    display:flex; gap:12px; padding:20px; overflow-x:auto; scroll-behavior:smooth;
+    border-radius:14px; border:1px solid var(--border); background:#fff;
+    box-shadow:inset 0 1px 0 #f1f5f9;
+  }
+  #frames::-webkit-scrollbar{ height:8px }
+  #frames::-webkit-scrollbar-thumb{ background:#a3a3a3; border-radius:8px }
+  .frame{
+    width:92px; height:72px; background:#e5e7eb; border:2px solid #9ca3af;
+    border-radius:10px; display:flex; justify-content:center; align-items:center;
+    flex-direction:column; font-weight:800; transition:.25s;
+  }
+  .sent{ background:var(--sent); border-color:#1f5fb5; color:#fff }
+  .acked{ background:var(--ack); border-color:#1f844d; color:#fff }
+  .lost{ background:var(--lost); border-color:#b92a24; color:#fff }
+  .re{ background:var(--re); border-color:#d4a107; color:#111 }
+  #window{
+    position:absolute; top:12px; height:116px; pointer-events:none;
+    border:3px solid var(--brand); border-radius:12px;
+    box-shadow:0 0 0 6px rgba(43,76,126,.08);
+    transition:left .45s ease, width .25s ease;
+  }
+  #status{ margin-top:14px; padding:14px 16px }
+  small.helper{display:block; color:var(--muted); margin-top:6px}
+  .legend{ display:flex; gap:16px; margin-top:12px; color:var(--muted) }
+  .dot{ width:10px; height:10px; border-radius:50% }
+</style>
+</head>
+<body>
+  <h2>Go-Back-N ARQ — Interactive Simulator</h2>
+
+  <div id="controls" class="panel">
+    <div class="field">
+      <label>Window size (N)</label>
+      <input id="winN" type="number" value="4" min="1" max="10">
+    </div>
+    <div class="field">
+      <label>Total frames</label>
+      <input id="total" type="number" value="12" min="1" max="60">
+    </div>
+    <div class="field" style="min-width:260px">
+      <label>Lost DATA frames (comma separated)</label>
+      <input id="lost" type="text" value="5, 9">
+      <small class="helper">Frames are 0-based (you can also type 1-based; we normalize).</small>
+    </div>
+    <div class="field">
+      <label>Speed (slower ⇠ ⇢ faster)</label>
+      <input id="speed" type="range" min="0.4" max="2" step="0.2" value="0.8">
+    </div>
+    <button id="start" class="btn">Start</button>
+  </div>
+
+  <div id="framesWrap" class="panel">
+    <div id="frames"></div>
+    <div id="window"></div>
+  </div>
+
+  <div id="status" class="panel">Status: Ready</div>
+
+  <div class="legend">
+    <span style="display:flex;align-items:center;gap:8px">
+      <span class="dot" style="background:var(--sent)"></span> Sent
+    </span>
+    <span style="display:flex;align-items:center;gap:8px">
+      <span class="dot" style="background:var(--ack)"></span> ACKed (cumulative)
+    </span>
+    <span style="display:flex;align-items:center;gap:8px">
+      <span class="dot" style="background:var(--lost)"></span> Lost (timeout)
+    </span>
+    <span style="display:flex;align-items:center;gap:8px">
+      <span class="dot" style="background:var(--re)"></span> Retransmitted (Go-Back-N)
+    </span>
+  </div>
+
+<script>
+(() => {
+  const framesEl = document.getElementById('frames');
+  const windowEl = document.getElementById('window');
+  const statusEl = document.getElementById('status');
+  const btnStart = document.getElementById('start');
+
+  const W = 104; // spacing: card width (92) + gap(12)
+  const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+
+  btnStart.addEventListener('click', start);
+
+  async function start(){
+    // read inputs
+    const N = clamp(parseInt(val('winN')),1,50);
+    const total = clamp(parseInt(val('total')),1,120);
+    const speed = parseFloat(val('speed'));        // 0.4 .. 2
+    const slow = (t) => t / (speed || 1);
+
+    // normalize losses (accept 1-based too)
+    const rawLoss = val('lost').split(/[,\\s]+/).filter(Boolean).map(n => parseInt(n));
+    const lossSet = new Set(rawLoss
+      .filter(n => !isNaN(n))
+      .map(n => (rawLoss.includes(n-1) ? n : Math.max(0, n-1))) // if user typed 1-based and not 0-based neighbor
+    );
+
+    // build row
+    framesEl.innerHTML = '';
+    status('Initializing…');
+    const cards = [];
+    for(let i=0;i<total;i++){
+      const d = document.createElement('div');
+      d.className = 'frame';
+      d.innerHTML = `F${i}`;
+      framesEl.appendChild(d);
+      cards.push(d);
+    }
+
+    // prepare window overlay
+    windowEl.style.width = (N*W - 12 + 16) + 'px'; // cover exactly N cards (gap compensation + padding)
+    windowEl.style.left = '0px';
+
+    let base = 0;    // first unACKed
+    let next = 0;    // next seq to send
+
+    // helpers
+    const slideWindow = () => {
+      windowEl.style.left = (base*W - 8) + 'px';
+      // auto-scroll to keep window centered in view
+      const centerX = base*W + (N*W)/2;
+      const viewW = framesEl.clientWidth;
+      const target = Math.max(0, centerX - viewW/2);
+      framesEl.scrollTo({ left: target, behavior:'smooth' });
+    };
+    slideWindow();
+
+    // simulation loop
+    while (base < total) {
+      // 1) fill window
+      while (next < base + N && next < total) {
+        mark(cards[next], 'sent', `F${next}<br>Sent`);
+        status(`Sent F${next}`);
+        await sleep(slow(600));
+        next++;
+      }
+
+      // 2) find first loss among outstanding [base, next)
+      const outstanding = range(base, next);
+      const firstLoss = outstanding.find(f => lossSet.has(f));
+
+      if (firstLoss === undefined) {
+        // No loss: ACK everything in-order
+        for (const f of outstanding) {
+          mark(cards[f], 'acked', `F${f}<br>ACK`);
+          status(`ACK for F${f}`);
+          base++;
+          slideWindow();
+          await sleep(slow(520));
+        }
+        continue;
+      }
+
+      // There is a loss. ACK all frames BEFORE the loss (in-order),
+      // then time out, then retransmit from firstLoss to next-1.
+      for (const f of outstanding) {
+        if (f < firstLoss) {
+          mark(cards[f], 'acked', `F${f}<br>ACK`);
+          status(`ACK for F${f}`);
+          base++;
+          slideWindow();
+          await sleep(slow(520));
+        } else break;
+      }
+
+      // mark the lost frame and wait for timeout
+      mark(cards[firstLoss], 'lost', `F${firstLoss}<br>LOST`);
+      status(`Frame F${firstLoss} lost → timeout …`);
+      await sleep(slow(1300)); // visible timeout
+
+      // Go-Back-N: resend the ENTIRE outstanding window from firstLoss
+      for (let f=firstLoss; f<next; f++) {
+        mark(cards[f], 're', `F${f}<br>Resent`);
+        await sleep(slow(650));
+        mark(cards[f], 'sent', `F${f}<br>Sent`);
+        await sleep(slow(520));
+      }
+
+      // Assume retransmission succeeds (classic demo); clear the loss flags up to next-1
+      for (let f=firstLoss; f<next; f++) lossSet.delete(f);
+
+      // Now ACK cumulatively from current base up to next-1
+      for (let f=base; f<next; f++) {
+        mark(cards[f], 'acked', `F${f}<br>ACK`);
+        status(`ACK for F${f}`);
+        base++;
+        slideWindow();
+        await sleep(slow(520));
+      }
+    }
+
+    status('All frames successfully delivered ✔');
+  }
+
+  // --- utilities ---
+  function clamp(x, a, b){ return Math.max(a, Math.min(b, x)); }
+  function val(id){ return document.getElementById(id).value; }
+  function status(msg){ statusEl.textContent = 'Status: ' + msg; }
+  function mark(node, cls, html){
+    node.className = 'frame ' + cls;
+    node.innerHTML = html;
+  }
+  function range(a,b){ const out=[]; for(let i=a;i<b;i++) out.push(i); return out; }
+})();
+</script>
+</body>
+</html>
